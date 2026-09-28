@@ -149,9 +149,7 @@ def test_conforms_to_tool_protocol():
 
 
 async def test_execute_success():
-    stub = StubSession().returns(
-        call_result([text("one"), text("two")], is_error=False)
-    )
+    stub = StubSession().returns(call_result([text("one"), text("two")], is_error=False))
     tool = adapt_tool("srv", make_tool(name="echo"), stub)
     assert tool is not None
     result = await tool.execute('{"a": 1}')
@@ -210,9 +208,7 @@ async def test_execute_bad_json_no_call():
 
 
 async def test_execute_non_text_dropped(capsys):
-    stub = StubSession().returns(
-        call_result([text("keep"), image_block()], is_error=False)
-    )
+    stub = StubSession().returns(call_result([text("keep"), image_block()], is_error=False))
     tool = adapt_tool("srv", make_tool(name="echo"), stub)
     assert tool is not None
     result = await tool.execute("{}")

@@ -90,27 +90,31 @@ def test_e2e_slash_pops_menu_with_12():
     asyncio.run(sc())
 
 
-def test_e2e_s_filters_to_session_status():
+def test_e2e_s_filters_to_matching_commands():
     async def sc():
         app = _tui_app()
         async with app.run_test() as pilot:
             await pilot.pause()
             await _type(app, pilot, "/s")
             assert app.completion.active is True
-            assert [c.name for c in app.completion.items] == ["session", "status"]
+            # ch11 起 /skill 也以 s 起头，故为三项
+            assert [c.name for c in app.completion.items] == ["session", "skill", "status"]
 
     asyncio.run(sc())
 
 
-def test_e2e_down_enter_executes_second():
+def test_e2e_down_enter_executes_selected():
     async def sc():
         app = _tui_app()
         async with app.run_test() as pilot:
             await pilot.pause()
             await _type(app, pilot, "/s")
-            await pilot.press("down")  # [session, status] → status
+            await pilot.press("down")  # [session, skill, status] → skill
             await pilot.pause()
             assert app.completion.selected() is not None
+            assert app.completion.selected().name == "skill"
+            await pilot.press("down")  # → status
+            await pilot.pause()
             assert app.completion.selected().name == "status"
             await pilot.press("enter")
             await pilot.pause()

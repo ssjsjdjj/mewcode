@@ -6,9 +6,25 @@ handler 只依赖本协议（F33/F34），不直接持有 Textual App 引用；M
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Protocol
 
+from mewcode.llm import Message
 from mewcode.permission import Mode
+
+
+@dataclass(frozen=True)
+class SkillSummary:
+    """`/skill` 列表与 UI 查询用的一行 Skill 摘要（docs/ch11 T20）。
+
+    放在 command 包而不是 skills 包，是为了让 UI 协议的契约自洽；
+    `source` / `mode` 本期不展示（F34），保留给后续 UI 扩展。
+    """
+
+    name: str
+    description: str
+    source: str = ""
+    mode: str = ""
 
 
 class UI(Protocol):
@@ -44,6 +60,14 @@ class UI(Protocol):
 
     # 状态机查询（N3a：UI/PROMPT 命令仅在 idle 可执行）
     def idle(self) -> bool: ...
+
+    # Skill 相关（docs/ch11 T20，N11）
+    def list_catalog_skills(self) -> list[SkillSummary]: ...
+    def list_active_skills(self) -> list[str]: ...
+    def clear_active_skills(self) -> None: ...
+    def append_assistant_message(self, text: str) -> None: ...
+    def recent_messages(self, n: int) -> list[Message]: ...
+    def all_messages(self) -> list[Message]: ...
 
 
 class NopUI:
@@ -94,3 +118,20 @@ class NopUI:
 
     def idle(self) -> bool:
         return True
+
+    # Skill 相关零值实现（N11）
+    def list_catalog_skills(self) -> list[SkillSummary]:
+        return []
+
+    def list_active_skills(self) -> list[str]:
+        return []
+
+    def clear_active_skills(self) -> None: ...
+
+    def append_assistant_message(self, text: str) -> None: ...
+
+    def recent_messages(self, n: int) -> list[Message]:
+        return []
+
+    def all_messages(self) -> list[Message]:
+        return []

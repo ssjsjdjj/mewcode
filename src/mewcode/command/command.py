@@ -35,3 +35,4 @@ class Command:
     handler: Handler
     aliases: list[str] = field(default_factory=list)  # 不带 "/"、全小写、全局唯一（含 name）
     hidden: bool = False  # /help 与补全菜单不显示，但 dispatcher 仍可命中
+    is_skill: bool = False  # 由 Skill 注册而来，reload 时按此标记整体清除（docs/ch11 T23）

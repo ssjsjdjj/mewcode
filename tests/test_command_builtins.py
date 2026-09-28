@@ -23,8 +23,8 @@ BUILTIN_NAMES = [
     "permission",
     "plan",
     "resume",
-    "review",
     "session",
+    "skill",
     "status",
 ]
 

@@ -44,24 +44,34 @@ def test_determinism():
 
 def test_optional_modules_parameterized():
     """非空参数填充对应槽位，空槽仍为 content=\"\"。"""
-    mods = optional_modules("指令文本", "记忆文本")
+    mods = optional_modules("指令文本", "记忆文本", "Skill 清单文本")
     assert mods[0].name == "custom_instructions" and mods[0].content == "指令文本"
-    assert mods[1].name == "active_skills" and mods[1].content == ""  # 尚未接入
+    assert mods[1].name == "skills_catalog" and mods[1].content == "Skill 清单文本"
     assert mods[2].name == "long_term_memory" and mods[2].content == "记忆文本"
+
+    empty = optional_modules("指令文本", "记忆文本")
+    assert empty[1].name == "skills_catalog" and empty[1].content == ""  # 未传则空槽
 
 
 def test_build_system_prompt_with_params():
-    """非空指令/记忆 → 对应模块出现在系统提示中且按优先级排列。"""
-    text = build_system_prompt("按 MEWCODE.md 行事", "记忆：用户喜欢简洁")
+    """非空指令/记忆/Skill 清单 → 对应模块出现在系统提示中且按优先级排列。"""
+    text = build_system_prompt("按 MEWCODE.md 行事", "记忆：用户喜欢简洁", "## Available Skills")
     assert "按 MEWCODE.md 行事" in text
     assert "记忆：用户喜欢简洁" in text
-    # custom-instructions(80) 排在 long-term-memory(100) 之前
-    assert text.index("按 MEWCODE.md 行事") < text.index("记忆：用户喜欢简洁")
+    assert "## Available Skills" in text
+    # custom-instructions(80) < skills-catalog(90) < long-term-memory(100)
+    assert (
+        text.index("按 MEWCODE.md 行事")
+        < text.index("## Available Skills")
+        < text.index("记忆：用户喜欢简洁")
+    )
 
 
 def test_build_system_prompt_empty_matches_old():
-    """向后兼容：空参数输出与 ch08 的 build_system_prompt() 逐字节一致。"""
+    """向后兼容：空参数输出与旧签名逐字节一致（skills-catalog 空槽不产生任何文本）。"""
     assert build_system_prompt() == build_system_prompt("", "")
+    assert build_system_prompt() == build_system_prompt("", "", "")
+    assert "Available Skills" not in build_system_prompt()
 
 
 def test_double_reinforcement_in_system():

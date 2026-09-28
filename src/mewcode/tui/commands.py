@@ -15,12 +15,14 @@ from mewcode import compact
 from mewcode.agent import CompactEvent, CompactPhase
 from mewcode.command.command import Kind
 from mewcode.command.dispatch import parse
+from mewcode.command.ui import SkillSummary
 from mewcode.conversation import Conversation
+from mewcode.llm import Message as LLMMessage  # 勿与 textual.message.Message 混名
 from mewcode.permission import Mode
 from mewcode.session import Writer, list_sessions
 from mewcode.tui import ChatInput, SessionState
 from mewcode.tui.resume import SessionItem
-from mewcode.tui.view import error_block, notice_block
+from mewcode.tui.view import error_block, notice_block, render_markdown
 
 
 class CompactDone(Message):
@@ -183,6 +185,41 @@ class CommandMixin:
         """
         self.conv.add_user(preset_prompt)
         asyncio.create_task(self._begin_turn(display_label))
+
+    # ---- Skill 相关（docs/ch11 T27，UI 协议扩展 N11）----
+
+    def list_catalog_skills(self) -> list[SkillSummary]:
+        if self.catalog is None:
+            return []
+        return [
+            SkillSummary(s.meta.name, s.meta.description, str(s.source), s.meta.mode)
+            for s in self.catalog.list()
+        ]
+
+    def list_active_skills(self) -> list[str]:
+        if self.runtime is None:
+            return []
+        return self.runtime.active_skills.names()
+
+    def clear_active_skills(self) -> None:
+        if self.runtime is not None:
+            self.runtime.active_skills.clear()
+
+    def append_assistant_message(self, text: str) -> None:
+        """fork 回流：把子 Agent 的结论作为一条 assistant 消息写进主对话（F29）。
+
+        走 `Conversation.add_assistant` 而非自己拼消息，这样 writer 的 on_append
+        会自动把它落进会话 JSONL（用户角度看就是一条普通回复）。这里额外把它
+        渲染进 scrollback——fork 不经过 `_begin_turn`，没人替它写日志区。
+        """
+        self.conv.add_assistant(text)
+        self.query_one("#log", RichLog).write(render_markdown(text))
+
+    def recent_messages(self, n: int) -> list[LLMMessage]:
+        return self.conv.messages()[-n:] if n > 0 else []
+
+    def all_messages(self) -> list[LLMMessage]:
+        return self.conv.messages()
 
     def _bind_conversation(self, writer: Writer) -> Conversation:
         on_append = writer.on_append if writer is not None else None

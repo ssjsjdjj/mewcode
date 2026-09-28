@@ -85,10 +85,16 @@ class MewCodeApp(StreamingMixin, CommandMixin, App):
         instruction_text: str = "",
         memory_text: str = "",
         discovery: Any = None,
+        catalog: Any = None,
+        executor: Any = None,
     ) -> None:
         super().__init__()
         self._providers = providers
         self._version = version
+        # ch11 Skill：Catalog 供 /skill 与 LoadSkill 清单；Executor 供 /<name> 命令。
+        # 两者由 cli 装配后注入；直接构造 App 的测试场景留空即退化为「无 Skill」。
+        self.catalog = catalog
+        self.executor = executor
         self.tool_registry = (
             registry  # ch03：tool registry（勿用 _registry，与 textual 内部属性冲突）
         )
@@ -217,6 +223,11 @@ class MewCodeApp(StreamingMixin, CommandMixin, App):
                 memory_manager=self.mem_mgr,
                 discovery=self.discovery,
             )
+            # Skill 清单进稳定系统提示（docs/ch11 F21）；loader 工具要能激活
+            self.agent.with_catalog(self.catalog)
+            # fork 分支要 provider 与主 Agent（摘要用），此处才算齐备（ch11 T27）
+            if self.executor is not None:
+                self.executor.bind(self.provider, self.agent)
 
     def visible_tool_defs(self) -> list[ToolDefinition]:
         """本轮可见的工具定义（docs/ch07 追加 T15）。

@@ -66,9 +66,11 @@ async def test_amain_no_mcp_config(tmp_path, monkeypatch):
 
     code = await cli._amain()
     assert code == 0
-    assert len(captured["tools"]) == 6  # 内置 6 工具
+    # 内置 6 工具 + ch11 的 load_skill / install_skill
+    assert len(captured["tools"]) == 8
     assert "read_file" in captured["tools"]
-    # F16/N10：没有可延迟工具就不注册 tool_search，/status 仍报 6
+    assert "load_skill" in captured["tools"] and "install_skill" in captured["tools"]
+    # F16/N10：没有可延迟工具就不注册 tool_search
     assert "tool_search" not in captured["tools"]
     assert captured["discovery"].has_deferrable() is False
 

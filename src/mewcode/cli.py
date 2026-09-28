@@ -17,6 +17,7 @@ from mewcode import __version__, instructions, memory, mcp as mcp_client
 from mewcode import config as config_mod
 from mewcode import session as session_mod
 from mewcode.agent import SessionRuntime
+from mewcode.command import SkillSummary, register_skills_as_commands
 from mewcode.compact import (
     CompactCircuitBreaker,
     ContentReplacementState,
@@ -24,13 +25,37 @@ from mewcode.compact import (
     new_session_context,
 )
 from mewcode.config import ConfigError, effective_context_window
+from mewcode.llm import new_provider
 from mewcode.permission import new_engine
+from mewcode.skills import Catalog, Executor
 from mewcode.tool import new_default_registry
 from mewcode.tool.deferred import Discovery
+from mewcode.tool.install_skill import InstallSkillTool
+from mewcode.tool.load_skill import LoadSkillTool
 from mewcode.tool.tool_search import ToolSearchTool
 from mewcode.tui.app import MewCodeApp
 
 CONFIG_PATH = ".mewcode/config.yaml"
+
+
+def _summaries(catalog: Catalog) -> list[SkillSummary]:
+    """Catalog → UI 层的摘要类型（`command` 包不依赖 skills 包）。"""
+    return [
+        SkillSummary(s.meta.name, s.meta.description, str(s.source), s.meta.mode)
+        for s in catalog.list()
+    ]
+
+
+def _drop_conflicting_skills(catalog: Catalog, cmd_reg) -> None:  # noqa: ANN001
+    """与内置命令同名/撞别名的 Skill 不加载（docs/ch11 F16）。
+
+    被丢掉的不只是命令注册——Skill 本身也从 Catalog 移除，`/skill` 与
+    LoadSkill 都看不到它。内置命令的可靠性优先于 Skill 的可定制性。
+    """
+    for name in list(catalog.names()):
+        if cmd_reg.lookup(name) is not None:
+            print(f"skill {name} conflicts with builtin command, skipped", file=sys.stderr)
+            catalog.remove(name)
 
 
 async def _amain() -> int:
@@ -91,6 +116,36 @@ async def _amain() -> int:
             )
         else:
             runtime = SessionRuntime(replacement, recovery, auto_tracking, ses_ctx)
+
+        # ---- Skill 系统装配（docs/ch11 T28）----
+        # 顺序有讲究：先扫 Catalog，再注册两个 Skill 工具，然后才能做 fail-fast
+        # 依赖检查（F15 要求检查时 MCP 工具已在册），最后才注册 Skill 命令。
+        catalog = Catalog.load(root)
+        active = runtime.active_skills
+        registry.register(LoadSkillTool(catalog, active, registry))
+        registry.register(InstallSkillTool(catalog, root))
+        for issue in catalog.validate_tools(registry):
+            print(
+                f'skill {issue.skill_name}: allowed_tool "{issue.tool_name}" '
+                "not registered, skipped",
+                file=sys.stderr,
+            )
+            catalog.remove(issue.skill_name)
+
+        executor = Executor(
+            catalog,
+            registry,
+            engine,
+            __version__,
+            runtime,
+            instruction_text=instruction_text,
+            memory_text=memory_text,
+            # provider 落地：单 provider 此处即可定；多 provider 待 TUI 选中后
+            # 由 App 调 executor.bind() 补上（fork 分支才用得到）
+            provider=new_provider(cfg.providers[0]) if len(cfg.providers) == 1 else None,
+            provider_config=cfg.providers[0] if len(cfg.providers) == 1 else None,
+        )
+
         app = MewCodeApp(
             cfg.providers,
             __version__,
@@ -102,7 +157,14 @@ async def _amain() -> int:
             instruction_text=instruction_text,
             memory_text=memory_text,
             discovery=discovery,
+            catalog=catalog,
+            executor=executor,
         )
+        # 内置命令已在 App 构造期注册完，此时才能做 F16 的名字冲突检查：
+        # 与内置命令同名/撞别名的 Skill 直接不加载（保护内置命令的可靠性）
+        _drop_conflicting_skills(catalog, app.cmd_registry)
+        register_skills_as_commands(app.cmd_registry, _summaries(catalog), executor)
+
         try:
             await app.run_async()
         except KeyboardInterrupt:

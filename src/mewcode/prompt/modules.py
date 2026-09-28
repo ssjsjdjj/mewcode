@@ -61,14 +61,17 @@ def fixed_modules() -> list[Module]:
     ]
 
 
-def optional_modules(instructions: str = "", memory: str = "") -> list[Module]:
-    """三个可选槽位（docs/ch05 F1；ch09 T12 参数化）。
+def optional_modules(
+    instructions: str = "", memory: str = "", skills_catalog: str = ""
+) -> list[Module]:
+    """三个可选槽位（docs/ch05 F1；ch09 T12 参数化；ch11 T10 接入 Skill 清单）。
 
-    custom_instructions 填充 MEWCODE.md 指令文本、long_term_memory 填充记忆索引；
-    内容为空则装配时跳过（与 ch08 空槽行为一致）。
+    custom_instructions 填充 MEWCODE.md 指令文本、skills_catalog 填充已加载 Skill 的
+    名字+描述清单（两阶段加载的第一阶段，docs/ch11 F21）、long_term_memory 填充记忆
+    索引；内容为空则装配时跳过（与 ch08 空槽行为一致）。
     """
     return [
         Module("custom_instructions", 80, instructions),
-        Module("active_skills", 90, ""),  # 已激活 Skill（后续章节接入）
+        Module("skills_catalog", 90, skills_catalog),
         Module("long_term_memory", 100, memory),
     ]

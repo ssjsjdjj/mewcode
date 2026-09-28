@@ -43,6 +43,7 @@ from mewcode.llm import (
 )
 from mewcode.llm import Usage as LLMUsage
 from mewcode.permission import Decision, Engine, Mode, Outcome
+from mewcode.skills import Catalog, active_to_prompt_entries, catalog_to_prompt_items
 from mewcode.tool import DEFAULT_TIMEOUT, Registry, Result, ToolDefinition
 from mewcode.tool.deferred import Discovery
 
@@ -166,8 +167,71 @@ class Agent:
                 context_window=200000,
             )
         self.runtime = runtime
+        # Skill Catalog（docs/ch11 T26）：非空时把「名字+描述」清单拼进稳定系统提示。
+        # 用普通 setter 而不是链式 builder——本项目没有 AgentOption 那套构造器。
+        self._catalog: Catalog | None = None
         # 用 asyncio.Lock 保证 run 与 run_force_compact 不并发
         self._run_lock = asyncio.Lock()
+
+    # ---- Skill 接入（docs/ch11 T26）----
+
+    def with_catalog(self, catalog: Catalog | None) -> None:
+        """注入 Skill Catalog，供第一阶段清单注入。"""
+        self._catalog = catalog
+
+    def activate_skill(self, name: str, body: str) -> None:
+        """把某个 Skill 的 SOP 钉到本会话的环境上下文（LoadSkill 工具调）。"""
+        self.runtime.active_skills.activate(name, body)
+
+    def clear_active_skills(self) -> None:
+        self.runtime.active_skills.clear()
+
+    def list_active_skills(self) -> list[str]:
+        return self.runtime.active_skills.names()
+
+    def _build_stable_prompt(self) -> str:
+        """稳定系统提示：注入 MEWCODE.md 指令、Skill 清单、记忆索引（F21）。"""
+        catalog_text = ""
+        if self._catalog is not None:
+            catalog_text = prompt.render_skills_catalog(catalog_to_prompt_items(self._catalog))
+        return prompt.build_system_prompt(self._instruction_text, self._memory_text, catalog_text)
+
+    async def summarize_for_fork(self, msgs: list[Message]) -> str:
+        """为 `fork_context=full` 生成主对话摘要（docs/ch11 F28）。
+
+        复用 ch09 的摘要管道（`compact.layer2.summarize_once`）。它只读
+        `ManageInput.provider`，其余字段填本 runtime 的现值即可；摘要请求不更新
+        用量锚点。异常向上抛，由 Executor 降级处理。
+        """
+        from mewcode.compact.layer2 import summarize_once
+
+        in_ = ManageInput(
+            conv=Conversation(),  # summarize_once 不读 conv
+            provider=self._provider,
+            model=self._provider.model,
+            context_window=self.runtime.context_window,
+            tool_defs=[],  # 摘要请求不带工具
+            replacement=self.runtime.replacement,
+            recovery=self.runtime.recovery,
+            auto_tracking=self.runtime.auto_tracking,
+            session=self.runtime.session,
+            usage_anchor=self.runtime.usage_anchor,
+            anchor_msg_len=self.runtime.anchor_msg_len,
+            estimated_token=0,
+            trigger=TriggerKind.AUTO,
+        )
+        return await summarize_once(in_, msgs)
+
+    def _compose_env(self, env_base: str) -> str:
+        """环境上下文 = 基础环境块 + 当前已激活 Skill 的 SOP（F22）。
+
+        必须**每轮迭代**重算：同一轮里 LoadSkill 刚激活的 Skill 要在下一次请求
+        就可见。基础环境块每轮 run 只采集一次（它要跑 git 子进程），这里只重拼后缀。
+        """
+        block = prompt.render_active_skills_block(
+            active_to_prompt_entries(self.runtime.active_skills)
+        )
+        return f"{env_base}\n\n{block}" if block else env_base
 
     async def _stream_once(
         self,
@@ -219,12 +283,13 @@ class Agent:
         # 用 asyncio.Lock 保证 run 与 run_force_compact 不并发触发 manage_context；
         # 也省去 runtime 上的细粒度锁——asyncio 单线程 + 本锁已保证串行（T27）。
         async with self._run_lock:
-            # 稳定系统提示 + 环境信息（docs/ch05 F2/F3）；git 采集走线程，不阻塞事件循环（N4）
-            stable = prompt.build_system_prompt(self._instruction_text, self._memory_text)
+            # 稳定系统提示 + 环境信息（docs/ch05 F2/F3）；git 采集走线程，不阻塞事件循环（N4）。
+            # 环境块每轮 run 只采集一次；已激活 Skill 的后缀在循环内逐轮重拼（ch11 F22）。
+            stable = self._build_stable_prompt()
             env = await asyncio.to_thread(
                 prompt.gather_environment, self._version, self._provider.model
             )
-            env_text = env.render()
+            env_base = env.render()
 
             unknown_run = 0
             for it in range(1, MAX_ITERATIONS + 1):
@@ -242,6 +307,9 @@ class Agent:
                 # （docs/ch07 追加 F22）——每轮重算，因此上一轮 tool_search 拉到的
                 # 工具下一轮就进来，本轮刚拉的则要等下一轮。
                 defs = self._discovery.visible_definitions(plan_only=mode == Mode.PLAN)
+
+                # 环境上下文逐轮重拼：同一轮内 LoadSkill 激活的 SOP 下次请求即生效
+                env_text = self._compose_env(env_base)
 
                 # 规划模式按轮次注入 reminder（docs/ch05 F7）
                 reminder = ""

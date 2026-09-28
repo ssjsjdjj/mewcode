@@ -11,6 +11,12 @@ from __future__ import annotations
 from .environment import Environment, gather_environment
 from .modules import Module, fixed_modules, optional_modules
 from .reminder import EXECUTE_DIRECTIVE, plan_reminder, system_reminder
+from .skills_block import (
+    ActiveSkillEntry,
+    SkillCatalogItem,
+    render_active_skills_block,
+    render_skills_catalog,
+)
 
 __all__ = [
     "Module",
@@ -26,6 +32,10 @@ __all__ = [
     "CAT_BANNER",
     "READY_HINT",
     "render_banner",
+    "ActiveSkillEntry",
+    "SkillCatalogItem",
+    "render_active_skills_block",
+    "render_skills_catalog",
 ]
 
 
@@ -36,13 +46,14 @@ def assemble_system(mods: list[Module]) -> str:
     return "\n\n".join(blocks)
 
 
-def build_system_prompt(instructions: str = "", memory: str = "") -> str:
+def build_system_prompt(instructions: str = "", memory: str = "", skills_catalog: str = "") -> str:
     """完整稳定系统提示（固定模块 + 可选槽位；空槽自动跳过，与 ch08 一致）。
 
     ch09 起 custom-instructions（priority 80）填入指令文本、long-term-memory
-    （priority 100）填入记忆索引（docs/ch09 F7/F43）。
+    （priority 100）填入记忆索引（docs/ch09 F7/F43）；ch11 起 skills-catalog
+    （priority 90）填入已加载 Skill 的名字+描述清单（docs/ch11 F21）。
     """
-    return assemble_system(fixed_modules() + optional_modules(instructions, memory))
+    return assemble_system(fixed_modules() + optional_modules(instructions, memory, skills_catalog))
 
 
 CAT_BANNER = r"""    /\_/\

@@ -106,6 +106,41 @@ class Registry:
         """可延迟工具的完整名，按注册顺序（docs/ch07 追加 F14/F15）。"""
         return [n for n in self._order if self.is_deferrable(n)]
 
+    def is_system(self, name: str) -> bool:
+        """该工具是否标记为系统工具（docs/ch11 F23）。
+
+        与 `is_deferrable` 同一惯例：读端 `getattr` 取默认值，不把 `is_system`
+        加进 `Tool` Protocol——那会波及全部既有工具实现。未声明者一律 False。
+        """
+        tool = self._tools.get(name)
+        return tool is not None and bool(getattr(tool, "is_system", False))
+
+    def system_definitions(self) -> list[ToolDefinition]:
+        """只导出系统工具（docs/ch11 F23）。"""
+        return [d for d in self.definitions() if self.is_system(d.name)]
+
+    def definitions_filtered(self, allowed: list[str]) -> list[ToolDefinition]:
+        """按白名单过滤工具定义，系统工具豁免（docs/ch11 F30）。
+
+        空白名单 = 不再收窄（F30 第 5 步），等价 `definitions()`；因此即便调用方
+        传了空 `allowed_tools`，`load_skill` 这类系统工具也仍在导出的定义里。
+        """
+        if not allowed:
+            return self.definitions()
+        wanted = set(allowed)
+        return [d for d in self.definitions() if d.name in wanted or self.is_system(d.name)]
+
+    def register_skill_tool(self, t: Tool) -> None:
+        """登记 Skill 专属工具，重名静默覆盖（docs/ch11 F23）。
+
+        与 `register` 的硬失败语义相反：Skill 的 `tool.json` 工具名可能与既有工具
+        重名，此时以 Skill 的为准，不打断 LoadSkill 调用。
+        """
+        name = t.name()
+        if name not in self._tools:
+            self._order.append(name)
+        self._tools[name] = t
+
     def count(self) -> int:
         """当前已注册工具数量（O(1)，docs/ch10 T0c，/status 命令数据源）。"""
         return len(self._order)

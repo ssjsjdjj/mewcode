@@ -39,6 +39,12 @@ async def handle_resume(ui: UI) -> None:
 
 
 async def handle_clear(ui: UI) -> None:
-    """/clear：结束当前会话并开启新会话（F17/N9，旧存档保留可 /resume）。"""
+    """/clear：结束当前会话并开启新会话（F17/N9，旧存档保留可 /resume）。
+
+    docs/ch11 F25/N9 额外要求：清空已激活 Skill 必须发生在**新建 session writer
+    之前**，否则新会话首轮 env context 可能还带着上一会话的 SOP。与 ch10 里
+    `discovery.reset()` 刻意放在新会话建立**之后**的语义相反，两处顺序都不要动。
+    """
+    ui.clear_active_skills()
     ui.clear_and_new_session()
     ui.println("已清空当前会话,开启新 session")

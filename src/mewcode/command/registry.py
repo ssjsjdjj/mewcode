@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from typing import Callable
+
 from mewcode.command.command import Command
 
 
@@ -43,3 +45,23 @@ class Registry:
         if p == "":
             return list(self._visible)
         return [c for c in self._visible if c.name.startswith(p)]
+
+    def remove_if(self, pred: Callable[[Command], bool]) -> int:
+        """按谓词移除命令，返回移除条数（docs/ch11 T24）。
+
+        主名与全部别名都要从 `_by_name` 摘掉；`_visible` 本身按 name 有序，
+        删元素不破坏有序性，无需重排。
+
+        去重按 `id()` 而不是 `set()`——`Command` 是 `slots=True` 的 dataclass，
+        生成了 `__eq__` 因而不可哈希；同一 Command 会以多个别名键出现。
+        """
+        unique: dict[int, Command] = {id(c): c for c in self._by_name.values()}
+        doomed = [c for c in unique.values() if pred(c)]
+        if not doomed:
+            return 0
+        for cmd in doomed:
+            for key in (cmd.name, *cmd.aliases):
+                self._by_name.pop(key, None)
+        removed = {id(c) for c in doomed}
+        self._visible = [c for c in self._visible if id(c) not in removed]
+        return len(doomed)
