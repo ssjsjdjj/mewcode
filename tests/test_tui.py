@@ -27,6 +27,7 @@ BUILTIN_NAMES = [
     "do",
     "exit",
     "help",
+    "hooks",
     "memory",
     "permission",
     "plan",

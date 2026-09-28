@@ -12,6 +12,7 @@ _run_lock 串行 manage_context；流式请求抽成 `_stream_once`（yield 文�
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -31,6 +32,8 @@ from mewcode.compact import (
 from mewcode.compact.const import AUTO_SAFETY_MARGIN, MANUAL_SAFETY_MARGIN, SUMMARY_RESERVE
 from mewcode.compact.token import estimate_tokens, usage_anchor
 from mewcode.conversation import Conversation
+from mewcode.hook import DispatchResult
+from mewcode.hook import Event as HookEvent  # 勿与 agent 自己的 Event 混名
 from mewcode.llm import (
     ROLE_USER,
     Message,
@@ -51,6 +54,7 @@ from .event import CompactEvent, CompactPhase
 from .runtime import SessionRuntime
 
 if TYPE_CHECKING:
+    from mewcode.hook import Engine
     from mewcode.memory import Manager
 
 # ---- 迭代、停止常量（内置，不可配）----
@@ -58,6 +62,29 @@ if TYPE_CHECKING:
 MAX_ITERATIONS: int = 25  # 迭代上限兜底（F2）
 MAX_UNKNOWN_RUN: int = 3  # 连续「整轮只产生未知工具调用」的迭代数上限（F2）
 PLAN_REMINDER_INTERVAL: int = 4  # 规划提醒完整版重复间隔（docs/ch05 F7）
+
+
+def _parse_tool_input(raw: str) -> dict:
+    """工具入参 JSON 串 → dict；解析失败给空 dict（hook 条件照常可判，不报错）。"""
+    try:
+        data = json.loads(raw) if raw and raw.strip() else {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _last_user_text(messages: list[Message]) -> str:
+    """对话里最后一条 user 消息的文本（PreUserMessage 的 payload，F9）。"""
+    for msg in reversed(messages):
+        if msg.role == ROLE_USER:
+            return msg.content
+    return ""
+
+
+def _hook_blocked_result(call: ToolCall, hook_name: str, reason: str) -> ToolResult:
+    """被 hook 拦下的工具结果（F32）：`[hook <name>] <reason>`，is_error=True。"""
+    return ToolResult(tool_call_id=call.id, content=f"[hook {hook_name}] {reason}", is_error=True)
+
 
 # 停止/收尾提示文案——既作 Event(notice) 推给 UI，也作 ensure_assistant_tail 写入历史的兜底文本
 NOTICE_MAX_ITER = "（已达最大迭代轮数 25，自动停止；可继续发消息推进。）"
@@ -142,10 +169,17 @@ class Agent:
         memory_text: str = "",
         memory_manager: "Manager | None" = None,
         discovery: Discovery | None = None,
+        hook_engine: "Engine | None" = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
         self._version = version
+        # Hook 引擎（docs/ch12 T15）：None 时所有 emit 退化成空操作
+        self._hook_engine = hook_engine
+        if hook_engine is not None and runtime is not None:
+            runtime.hook_engine = hook_engine
+        # 当前轮次权限模式，供 hook payload 的 mode 字段用（run 是串行的，存这里安全）
+        self._current_mode: Mode = Mode.DEFAULT
         # 延迟加载视图（docs/ch07 追加 T14）。未注入时自建一份——测试与独立使用
         # Agent 的场景照旧只传 registry，且自建视图的已发现集合恒为空（等价旧行为）。
         self._discovery = discovery or Discovery(registry)
@@ -222,6 +256,49 @@ class Agent:
         )
         return await summarize_once(in_, msgs)
 
+    # ---- Hook 接入（docs/ch12 T15/T16）----
+
+    def _hook_payload(self, event: HookEvent, **extra) -> dict:
+        """事件 payload：通用字段 + 事件特化字段（F10）。"""
+        payload = {
+            "event": event.value,
+            "session_id": self.runtime.session.session_id,
+            "cwd": str(Path.cwd()),
+            "mode": str(self._current_mode),
+        }
+        payload.update(extra)
+        return payload
+
+    async def _dispatch_hook(self, event: HookEvent, **extra) -> DispatchResult:
+        """分派一次事件；注入的 prompt 进 runtime 的待发队列（F33）。
+
+        引擎缺失时返回空结果——hook 是可选增强，没配就不该影响任何行为。
+        """
+        if self._hook_engine is None:
+            return DispatchResult()
+        result = await self._hook_engine.dispatch(event, self._hook_payload(event, **extra))
+        if result.injected_prompts:
+            self.runtime.append_reminders(result.injected_prompts)
+        return result
+
+    def _build_reminder(self, mode: Mode, it: int) -> str:
+        """本轮 reminder：plan 提醒 + 工具清单 + hook 注入的文本（F20/F33）。
+
+        沿用原有的 `\\n` 分隔（而非 `\\n\\n`），这样没有 hook 时输出的字节与
+        历史行为完全一致。hook 注入的文本**排在最后**（N4：不入历史、不参与压缩）。
+        """
+        parts: list[str] = []
+        if mode == Mode.PLAN:
+            full = it == 1 or (it - 1) % PLAN_REMINDER_INTERVAL == 0
+            parts.append(prompt.plan_reminder(full))
+
+        manifest = self._discovery.manifest()
+        if manifest is not None:
+            parts.append(prompt.system_reminder(manifest))
+
+        parts.extend(self.runtime.take_reminders())
+        return "\n".join(p for p in parts if p)
+
     def _compose_env(self, env_base: str) -> str:
         """环境上下文 = 基础环境块 + 当前已激活 Skill 的 SOP（F22）。
 
@@ -250,6 +327,9 @@ class Agent:
         注：async generator 不允许 return value（PEP 525），结果经 out 传出；
         run 完整消费本生成器后 out 必已填充。
         """
+        # 每轮请求 provider 之前 emit，payload 带当前对话末尾的 user 消息（F9）
+        await self._dispatch_hook(HookEvent.PRE_USER_MESSAGE, prompt=_last_user_text(req.messages))
+
         text_parts: list[str] = []
         calls: list[ToolCall] = []
         usage: LLMUsage | None = None
@@ -283,6 +363,7 @@ class Agent:
         # 用 asyncio.Lock 保证 run 与 run_force_compact 不并发触发 manage_context；
         # 也省去 runtime 上的细粒度锁——asyncio 单线程 + 本锁已保证串行（T27）。
         async with self._run_lock:
+            self._current_mode = mode  # hook payload 用（run 由 _run_lock 串行）
             # 稳定系统提示 + 环境信息（docs/ch05 F2/F3）；git 采集走线程，不阻塞事件循环（N4）。
             # 环境块每轮 run 只采集一次；已激活 Skill 的后缀在循环内逐轮重拼（ch11 F22）。
             stable = self._build_stable_prompt()
@@ -311,21 +392,9 @@ class Agent:
                 # 环境上下文逐轮重拼：同一轮内 LoadSkill 激活的 SOP 下次请求即生效
                 env_text = self._compose_env(env_base)
 
-                # 规划模式按轮次注入 reminder（docs/ch05 F7）
-                reminder = ""
-                if mode == Mode.PLAN:
-                    full = it == 1 or (it - 1) % PLAN_REMINDER_INTERVAL == 0
-                    reminder = prompt.plan_reminder(full)
-
-                # 未加载工具的名字清单走同一条 reminder 通道（docs/ch07 追加 F15）：
-                # 与 plan reminder 并列拼接而非互相覆盖；无可延迟工具时 manifest 为
-                # None，reminder 逐字节等于历史行为（F23）。
-                manifest = self._discovery.manifest()
-                if manifest is not None:
-                    block = prompt.system_reminder(manifest)
-                    reminder = f"{reminder}\n{block}" if reminder else block
-
                 # ---- 每轮请求前先走上下文管理（layer1 写回可能替换 conv 历史）----
+                # PreCompact 在所有压缩路径之前 emit（自动/紧急/手动合并，F9）
+                await self._dispatch_hook(HookEvent.PRE_COMPACT, trigger="auto")
                 est = estimate_tokens(
                     self.runtime.usage_anchor,
                     conv.messages(),
@@ -367,9 +436,24 @@ class Agent:
                             err=mc_err,
                         )
                     )
+                await self._dispatch_hook(
+                    HookEvent.POST_COMPACT,
+                    trigger="auto",
+                    before_tokens=out.before_tokens,
+                    after_tokens=out.after_tokens,
+                )
                 if mc_err is not None:
+                    await self._dispatch_hook(
+                        HookEvent.NOTIFICATION, kind="stream_error", detail=str(mc_err)
+                    )
                     yield Event(err=mc_err)
                     break
+
+                # reminder 只在本轮请求前取一次：plan 提醒 + 未加载工具清单 +
+                # 本轮已 emit 的各事件注入的文本（F15/F20/F33）。
+                # 工具执行期间注入的文本要等**下一个** LLM 请求才生效——这正是
+                # F20「加入下一次请求的 reminder 区」的语义。
+                reminder = self._build_reminder(mode, it)
 
                 req = Request(
                     messages=conv.messages(),
@@ -409,6 +493,7 @@ class Agent:
                         estimated_token=est,
                         trigger=TriggerKind.EMERGENCY,
                     )
+                    await self._dispatch_hook(HookEvent.PRE_COMPACT, trigger="emergency")
                     yield Event(compact=CompactEvent(phase=CompactPhase.BEFORE_EMERGENCY))
                     try:
                         emg_out = await manage_context(emg_in)
@@ -424,7 +509,16 @@ class Agent:
                             err=emg_err,
                         )
                     )
+                    await self._dispatch_hook(
+                        HookEvent.POST_COMPACT,
+                        trigger="emergency",
+                        before_tokens=emg_out.before_tokens,
+                        after_tokens=emg_out.after_tokens,
+                    )
                     if emg_err is not None:
+                        await self._dispatch_hook(
+                            HookEvent.NOTIFICATION, kind="stream_error", detail=str(emg_err)
+                        )
                         yield Event(err=emg_err)
                         break
                     # 紧急压缩后 anchor 重设为 0（压缩结果本身已含摘要/恢复附件）
@@ -449,6 +543,9 @@ class Agent:
                         yield ev
                     text, calls, usage, err = stream_out
                 if err is not None:
+                    await self._dispatch_hook(
+                        HookEvent.NOTIFICATION, kind="stream_error", detail=str(err)
+                    )
                     yield Event(err=err)
                     self._ensure_assistant_tail(conv, NOTICE_STREAM_ERR)
                     return
@@ -474,6 +571,7 @@ class Agent:
                         yield Event(text=final_text)
                     conv.add_assistant(final_text)
                     self._maybe_update_memory(conv)
+                    await self._dispatch_hook(HookEvent.STOP, iter=it)
                     yield Event(done=True)
                     return
 
@@ -493,12 +591,14 @@ class Agent:
                 if unknown_run >= MAX_UNKNOWN_RUN:
                     yield Event(notice=NOTICE_UNKNOWN_TOOLS)
                     self._ensure_assistant_tail(conv, NOTICE_UNKNOWN_TOOLS)
+                    await self._dispatch_hook(HookEvent.STOP, iter=it)
                     yield Event(done=True)
                     return
 
             # 触达迭代上限（F2-2）
             yield Event(notice=NOTICE_MAX_ITER)
             self._ensure_assistant_tail(conv, NOTICE_MAX_ITER)
+            await self._dispatch_hook(HookEvent.STOP, iter=it)
             yield Event(done=True)
 
     async def run_force_compact(
@@ -528,7 +628,14 @@ class Agent:
                 ),
                 trigger=TriggerKind.MANUAL,
             )
+            await self._dispatch_hook(HookEvent.PRE_COMPACT, trigger="manual")
             out = await manage_context(in_)
+            await self._dispatch_hook(
+                HookEvent.POST_COMPACT,
+                trigger="manual",
+                before_tokens=out.before_tokens,
+                after_tokens=out.after_tokens,
+            )
             return (out.before_tokens, out.after_tokens)
 
     async def _execute_batched(
@@ -562,6 +669,18 @@ class Agent:
                     j += 1
                 denied = [False] * n
                 for k in range(i, j):
+                    # PreToolUse 在权限判定**之前**（F9）：hook 拦下就跳过权限与执行
+                    hook = await self._dispatch_hook(
+                        HookEvent.PRE_TOOL_USE,
+                        tool_name=calls[k].name,
+                        tool_input=_parse_tool_input(calls[k].input),
+                    )
+                    if hook.blocked:
+                        results[k] = _hook_blocked_result(
+                            calls[k], hook.blocking_hook_name, hook.reason
+                        )
+                        denied[k] = True
+                        continue
                     decision, reason = self._engine.check(mode, calls[k], True)
                     if decision == Decision.DENY:
                         results[k] = ToolResult(
@@ -589,6 +708,14 @@ class Agent:
                     )
                 for k in range(i, j):
                     r = results[k]
+                    # PostToolUse 在拿到 result 之后、PhaseEnd 之前；被 Deny 的也触发（F9）
+                    await self._dispatch_hook(
+                        HookEvent.POST_TOOL_USE,
+                        tool_name=calls[k].name,
+                        tool_input=_parse_tool_input(calls[k].input),
+                        tool_result=r.content,
+                        is_error=r.is_error,
+                    )
                     yield Event(
                         tool=ToolEvent(
                             name=calls[k].name,
@@ -602,44 +729,69 @@ class Agent:
                 # 有副作用：串行单个（权限可能 Ask → 人在回路）
                 call = calls[i]
                 yield Event(tool=ToolEvent(name=call.name, args=call.input[:80], phase=Phase.START))
-                decision, reason = self._engine.check(mode, call, False)
-                if decision == Decision.DENY:
-                    results[i] = ToolResult(tool_call_id=call.id, content=reason, is_error=True)
-                elif decision == Decision.ALLOW:
-                    r = await self._registry.execute(call.name, call.input, DEFAULT_TIMEOUT)
-                    await self._record_file_read(call, r)
-                    results[i] = ToolResult(
-                        tool_call_id=call.id, content=r.content, is_error=r.is_error
-                    )
-                else:  # ASK → 第五层人在回路
-                    respond: asyncio.Future[Outcome] = asyncio.get_running_loop().create_future()
-                    yield Event(
-                        approval=ApprovalRequest(
-                            name=call.name, args=call.input[:80], reason=reason, respond=respond
-                        )
-                    )
-                    try:
-                        outcome = await respond
-                    except asyncio.CancelledError:
-                        fill_cancelled(i)
-                        out.update(results=results, completed=False)
-                        return
-                    if outcome in (Outcome.ALLOW_ONCE, Outcome.ALLOW_FOREVER):
-                        if outcome == Outcome.ALLOW_FOREVER:
-                            try:
-                                self._engine.persist_local_allow(call)
-                            except Exception:  # noqa: BLE001 —— 仅记日志不阻断
-                                pass
+
+                # PreToolUse 先于权限判定（F9）；被拦下就整段跳过权限与执行
+                hook = await self._dispatch_hook(
+                    HookEvent.PRE_TOOL_USE,
+                    tool_name=call.name,
+                    tool_input=_parse_tool_input(call.input),
+                )
+                if hook.blocked:
+                    results[i] = _hook_blocked_result(call, hook.blocking_hook_name, hook.reason)
+                else:
+                    decision, reason = self._engine.check(mode, call, False)
+                    if decision == Decision.DENY:
+                        results[i] = ToolResult(tool_call_id=call.id, content=reason, is_error=True)
+                    elif decision == Decision.ALLOW:
                         r = await self._registry.execute(call.name, call.input, DEFAULT_TIMEOUT)
                         await self._record_file_read(call, r)
                         results[i] = ToolResult(
                             tool_call_id=call.id, content=r.content, is_error=r.is_error
                         )
-                    else:  # DENY_ONCE
-                        results[i] = ToolResult(
-                            tool_call_id=call.id, content="用户拒绝了该操作", is_error=True
+                    else:  # ASK → 第五层人在回路
+                        await self._dispatch_hook(
+                            HookEvent.NOTIFICATION, kind="approval", detail=call.name
                         )
+                        respond: asyncio.Future[Outcome] = (
+                            asyncio.get_running_loop().create_future()
+                        )
+                        yield Event(
+                            approval=ApprovalRequest(
+                                name=call.name,
+                                args=call.input[:80],
+                                reason=reason,
+                                respond=respond,
+                            )
+                        )
+                        try:
+                            outcome = await respond
+                        except asyncio.CancelledError:
+                            fill_cancelled(i)
+                            out.update(results=results, completed=False)
+                            return
+                        if outcome in (Outcome.ALLOW_ONCE, Outcome.ALLOW_FOREVER):
+                            if outcome == Outcome.ALLOW_FOREVER:
+                                try:
+                                    self._engine.persist_local_allow(call)
+                                except Exception:  # noqa: BLE001 —— 仅记日志不阻断
+                                    pass
+                            r = await self._registry.execute(call.name, call.input, DEFAULT_TIMEOUT)
+                            await self._record_file_read(call, r)
+                            results[i] = ToolResult(
+                                tool_call_id=call.id, content=r.content, is_error=r.is_error
+                            )
+                        else:  # DENY_ONCE
+                            results[i] = ToolResult(
+                                tool_call_id=call.id, content="用户拒绝了该操作", is_error=True
+                            )
                 r = results[i]
+                await self._dispatch_hook(
+                    HookEvent.POST_TOOL_USE,
+                    tool_name=call.name,
+                    tool_input=_parse_tool_input(call.input),
+                    tool_result=r.content,
+                    is_error=r.is_error,
+                )
                 yield Event(
                     tool=ToolEvent(
                         name=call.name, phase=Phase.END, result=r.content, is_error=r.is_error

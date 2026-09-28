@@ -15,6 +15,7 @@ from pathlib import Path
 
 from mewcode import __version__, instructions, memory, mcp as mcp_client
 from mewcode import config as config_mod
+from mewcode import hook
 from mewcode import session as session_mod
 from mewcode.agent import SessionRuntime
 from mewcode.command import SkillSummary, register_skills_as_commands
@@ -25,6 +26,7 @@ from mewcode.compact import (
     new_session_context,
 )
 from mewcode.config import ConfigError, effective_context_window
+from mewcode.hook import Event
 from mewcode.llm import new_provider
 from mewcode.permission import new_engine
 from mewcode.skills import Catalog, Executor
@@ -117,6 +119,12 @@ async def _amain() -> int:
         else:
             runtime = SessionRuntime(replacement, recovery, auto_tracking, ses_ctx)
 
+        # ---- Hook 系统装配（docs/ch12 T22）----
+        # 在权限引擎之后加载（hook 条件与权限规则共用匹配器）；加载错误只 stderr，
+        # 不阻断启动（N1/N9）。引擎交给 runtime 与 App 两个使用方。
+        hook_engine = hook.load(root)
+        runtime.hook_engine = hook_engine
+
         # ---- Skill 系统装配（docs/ch11 T28）----
         # 顺序有讲究：先扫 Catalog，再注册两个 Skill 工具，然后才能做 fail-fast
         # 依赖检查（F15 要求检查时 MCP 工具已在册），最后才注册 Skill 命令。
@@ -159,6 +167,7 @@ async def _amain() -> int:
             discovery=discovery,
             catalog=catalog,
             executor=executor,
+            hook_engine=hook_engine,
         )
         # 内置命令已在 App 构造期注册完，此时才能做 F16 的名字冲突检查：
         # 与内置命令同名/撞别名的 Skill 直接不加载（保护内置命令的可靠性）
@@ -172,6 +181,18 @@ async def _amain() -> int:
         except Exception as exc:  # noqa: BLE001
             print(f"程序异常: {exc}", file=sys.stderr)
             return 1
+
+        # 退出兜底：Ctrl+C / 直接结束不会走 /exit 的 SessionEnd，这里补一次
+        # （docs/ch12 T22）。用不依赖 App 状态的最小 payload——此时 App 可能已拆。
+        await hook_engine.dispatch(
+            Event.SESSION_END,
+            {
+                "event": Event.SESSION_END.value,
+                "session_id": runtime.session.session_id,
+                "cwd": root,
+                "mode": str(engine.start_mode),
+            },
+        )
     finally:
         await mcp_mgr.close()
     return 0

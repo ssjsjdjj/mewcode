@@ -33,7 +33,7 @@ class RecordingUI(NopUI):
     def clear_active_skills(self) -> None:
         self.calls.append("clear_active_skills")
 
-    def clear_and_new_session(self) -> None:
+    async def clear_and_new_session(self) -> None:
         self.calls.append("clear_and_new_session")
 
 

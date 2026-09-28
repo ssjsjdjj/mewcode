@@ -20,6 +20,8 @@ from mewcode.agent import Agent, SessionRuntime
 from mewcode.command.builtins import register_builtins
 from mewcode.command.registry import Registry
 from mewcode.config import ProviderConfig, effective_context_window
+from mewcode.hook import DispatchResult
+from mewcode.hook import Event as HookEvent
 from mewcode.llm import Provider, ToolDefinition, new_provider
 from mewcode.permission import Engine, Mode, Outcome, new_engine
 from mewcode.prompt import render_banner
@@ -87,6 +89,7 @@ class MewCodeApp(StreamingMixin, CommandMixin, App):
         discovery: Any = None,
         catalog: Any = None,
         executor: Any = None,
+        hook_engine: Any = None,
     ) -> None:
         super().__init__()
         self._providers = providers
@@ -95,6 +98,8 @@ class MewCodeApp(StreamingMixin, CommandMixin, App):
         # 两者由 cli 装配后注入；直接构造 App 的测试场景留空即退化为「无 Skill」。
         self.catalog = catalog
         self.executor = executor
+        # ch12 Hook：None 时所有 emit 退化成空操作（与 ch11 行为一致）
+        self.hook_engine = hook_engine
         self.tool_registry = (
             registry  # ch03：tool registry（勿用 _registry，与 textual 内部属性冲突）
         )
@@ -161,6 +166,45 @@ class MewCodeApp(StreamingMixin, CommandMixin, App):
         else:
             self._populate_select()
             self.state = SessionState.SELECTING
+        # SessionStart 在挂载后立刻分派（docs/ch12 T18/T20）：此时 env context 已可
+        # 装配、首条 user 消息还没进历史，正是 F9 定义的时刻。与 _begin_turn 一样用
+        # create_task，不阻塞挂载。
+        asyncio.create_task(self._dispatch_session_start())
+
+    # ---- Hook 会话事件（docs/ch12 T18/T20）----
+
+    def _hook_payload(self, event: HookEvent, **extra: Any) -> dict:
+        """hook payload 的通用字段 + 事件特化字段（F10）。
+
+        TUI 侧各事件（SessionStart/End/Resume、UserPromptSubmit）共用本方法，
+        agent 侧另有自己的同名方法（它拿不到 App 的 cwd 与模式）。
+        """
+        payload: dict = {
+            "event": event.value,
+            "session_id": self.session_id(),
+            "cwd": self._cwd,
+            "mode": str(self._mode),
+        }
+        payload.update(extra)
+        return payload
+
+    async def _dispatch_hook(self, event: HookEvent, **extra: Any) -> DispatchResult | None:
+        """分派一次事件并把注入的 prompt 排进 runtime 队列；无引擎时返回 None。"""
+        if self.hook_engine is None:
+            return None
+        result = await self.hook_engine.dispatch(event, self._hook_payload(event, **extra))
+        if result.injected_prompts and self.runtime is not None:
+            self.runtime.append_reminders(result.injected_prompts)
+        return result
+
+    async def _dispatch_session_start(self) -> None:
+        await self._dispatch_hook(HookEvent.SESSION_START)
+
+    async def _dispatch_session_end(self) -> None:
+        await self._dispatch_hook(HookEvent.SESSION_END)
+
+    async def _dispatch_session_resume(self) -> None:
+        await self._dispatch_hook(HookEvent.SESSION_RESUME)
 
     def watch_state(self, old: SessionState, new: SessionState) -> None:
         if not self.is_mounted:
@@ -222,6 +266,7 @@ class MewCodeApp(StreamingMixin, CommandMixin, App):
                 memory_text=self.memory_text,
                 memory_manager=self.mem_mgr,
                 discovery=self.discovery,
+                hook_engine=self.hook_engine,
             )
             # Skill 清单进稳定系统提示（docs/ch11 F21）；loader 工具要能激活
             self.agent.with_catalog(self.catalog)

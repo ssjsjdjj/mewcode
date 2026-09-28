@@ -7,7 +7,7 @@ import pytest
 from mewcode.llm import ToolCall
 from mewcode.permission import Decision, Mode, new_engine
 from mewcode.permission.blacklist import hits_blacklist
-from mewcode.permission.rule import Rule, RuleSet, escape_glob, match_pattern, parse_rule
+from mewcode.permission.rule import RuleSet, escape_glob, match_pattern, parse_rule
 from mewcode.permission.sandbox import eval_symlinks_or_ancestor, sandbox_ok
 from mewcode.permission.settings import (
     SettingsError,
@@ -82,13 +82,22 @@ def test_sandbox_symlink_escape(tmp_path, monkeypatch):
 # ---------- 规则 ----------
 
 
+def _rule(rule_str: str, allow: bool = True):
+    """测试用：把规则串解析成 Rule（断言解析成功）。"""
+    rule, err = parse_rule(rule_str)
+    assert rule is not None, err
+    rule.allow = allow
+    return rule
+
+
 def test_rule_parse_and_match():
-    r, ok = parse_rule("Bash(git *)")
-    assert ok and r.tool == "Bash" and r.pattern == "git *"
-    r2, ok2 = parse_rule("Read")
-    assert ok2 and r2.pattern == ""
-    r3, ok3 = parse_rule("(bad")
-    assert not ok3
+    r = _rule("Bash(git *)")
+    assert r.tool == "Bash" and str(r.matcher) == "git *"
+    r2 = _rule("Read")
+    assert r2.matcher is None  # 无模式段 = 匹配该工具全部调用
+
+    bad, err = parse_rule("(bad")
+    assert bad is None and err is not None
     assert match_pattern("git *", "git status")
     assert not match_pattern("git *", "npm i")
     assert match_pattern("src/**", "src/a/b.py")
@@ -97,8 +106,35 @@ def test_rule_parse_and_match():
     assert match_pattern(escape_glob("echo *"), "echo *")  # 转义字面星号
 
 
+def test_rule_new_matcher_syntax():
+    """ch12 新增的四种类型在 Rule 层生效（F1/F2）。"""
+    assert _rule("Bash(=git status)").hits("Bash", "git status")
+    assert not _rule("Bash(=git status)").hits("Bash", "git status -s")
+
+    rx = _rule("Bash(~^npm (install|test)$)")
+    assert rx.hits("Bash", "npm install") and not rx.hits("Bash", "npm run dev")
+
+    neg = _rule("Bash(!~^rm)")
+    assert neg.hits("Bash", "ls -lh") and not neg.hits("Bash", "rm -rf .")
+
+    assert _rule("Bash(!=git status)").hits("Bash", "git diff")
+
+
+def test_bash_glob_now_matches_commands_with_slash():
+    """ch06 缺陷修复：`Bash(rm *)` 过去匹配不上含 `/` 的命令。
+
+    含 `/` 的目标过去会被误判为路径、切到分段匹配，导致单段模式匹配失败。
+    Bash 的裸 glob 现在按命令语义整串匹配（F3）。
+    """
+    assert _rule("Bash(rm *)").hits("Bash", "rm -rf /tmp")
+    assert _rule("Bash(*)").hits("Bash", "rm -rf /")
+    # 路径类工具仍是分段语义，`*` 不跨 `/`
+    assert _rule("Write(=a.txt)").hits("Write", "a.txt")
+    assert not _rule("Write(*.py)").hits("Write", "/tmp/x.py")
+
+
 def test_deny_priority_same_level():
-    rs = RuleSet(allow=[Rule("Bash", "git *", True)], deny=[Rule("Bash", "git push", False)])
+    rs = RuleSet(allow=[_rule("Bash(git *)")], deny=[_rule("Bash(git push)", allow=False)])
     d, hit = rs.match("Bash", "git push")
     assert hit and d == Decision.DENY
 
@@ -193,17 +229,15 @@ def test_mode_matrix(tmp_path):
 
 def test_rule_priority(tmp_path):
     engine = make_engine(tmp_path)
-    from mewcode.permission.rule import Rule
-
-    engine.local.allow.append(Rule("Bash", "git *", True))
-    engine.project.deny.append(Rule("Bash", "git status", False))
+    engine.local.allow.append(_rule("Bash(git *)"))
+    engine.project.deny.append(_rule("Bash(git status)", allow=False))
     assert (
         engine.check(Mode.DEFAULT, C("1", "bash", '{"command":"git status"}'), False)[0]
         == Decision.ALLOW
     )  # 本地 allow 就近
     engine2 = make_engine(tmp_path)
-    engine2.project.deny.append(Rule("Bash", "git status", False))
-    engine2.user.allow.append(Rule("Bash", "git *", True))
+    engine2.project.deny.append(_rule("Bash(git status)", allow=False))
+    engine2.user.allow.append(_rule("Bash(git *)"))
     assert (
         engine2.check(Mode.DEFAULT, C("1", "bash", '{"command":"git status"}'), False)[0]
         == Decision.DENY

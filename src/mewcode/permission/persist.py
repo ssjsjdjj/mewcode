@@ -9,24 +9,34 @@ import yaml
 
 from mewcode.llm import ToolCall
 
-from .rule import Rule, escape_glob
+from .rule import Rule, escape_glob, parse_rule
 from .settings import Settings, SettingsError, extract_target, friendly_name, load_settings
 
 
-def rule_for(call: ToolCall, root: str) -> tuple[Rule, str, bool]:
-    """据调用生成精确 allow 规则。返回 (Rule, YAML 规则串, 是否成功)。"""
+def rule_for(call: ToolCall, root: str) -> tuple[Rule | None, str, bool]:
+    """据调用生成精确 allow 规则。返回 (Rule, YAML 规则串, 是否成功)。
+
+    规则串用 `escape_glob` 转义成字面 glob（docs/ch12 T3 的既定做法，不改持久化
+    格式）；再交给 `parse_rule` 构造内存 Rule——两边走同一个解析器，磁盘与内存
+    不可能对不上（`is_command` 之类由工具名自动判定，不需要在这里重复判断）。
+    """
     target, is_file, ok = extract_target(call)
     friendly = friendly_name(call.name)
     if not ok or not target:
-        return Rule("", "", False), "", False
+        return None, "", False
     if is_file:
         # 文件类用项目相对路径（slash 形式）
         rel = os.path.relpath(target, root).replace("\\", "/")
         pattern = escape_glob(rel)
     else:
         pattern = escape_glob(target)
-    rule = Rule(tool=friendly, pattern=pattern, allow=True)
-    return rule, f"{friendly}({pattern})", True
+
+    rule_str = f"{friendly}({pattern})"
+    rule, _err = parse_rule(rule_str)
+    if rule is None:
+        return None, rule_str, False
+    rule.allow = True
+    return rule, rule_str, True
 
 
 def persist_local_allow(engine: object, call: ToolCall) -> None:

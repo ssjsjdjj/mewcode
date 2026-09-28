@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -55,18 +56,26 @@ def load_settings(path: str) -> Settings:
 
 
 def to_rule_set(settings: Settings) -> RuleSet:
-    """把 Settings 转成 RuleSet；非法规则条目跳过。"""
+    """把 Settings 转成 RuleSet；非法规则条目**报到 stderr 后跳过**（docs/ch12 F4）。
+
+    过去失败是静默的——用户写了条错规则却毫无反馈，以为已经生效。现在每条失败都
+    打印规则原文与原因，其余规则照常加载（不因为一条坏规则整份配置作废）。
+    """
     rs = RuleSet()
     for s in settings.permissions.allow:
-        rule, ok = parse_rule(s)
-        if ok:
-            rule.allow = True
-            rs.allow.append(rule)
+        rule, err = parse_rule(s)
+        if rule is None:
+            print(f"rule {s!r} parse failed: {err}", file=sys.stderr)
+            continue
+        rule.allow = True
+        rs.allow.append(rule)
     for s in settings.permissions.deny:
-        rule, ok = parse_rule(s)
-        if ok:
-            rule.allow = False
-            rs.deny.append(rule)
+        rule, err = parse_rule(s)
+        if rule is None:
+            print(f"rule {s!r} parse failed: {err}", file=sys.stderr)
+            continue
+        rule.allow = False
+        rs.deny.append(rule)
     return rs
 
 

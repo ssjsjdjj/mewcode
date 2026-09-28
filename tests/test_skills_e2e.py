@@ -252,7 +252,7 @@ def test_builtins_after_skill_takeover():
     """内置命令表：仍是 12 条，但 /review 已让位、新增 /skill（AC2）。"""
     reg = Registry()
     register_builtins(reg)
-    assert len(reg.visible()) == 12
+    assert len(reg.visible()) == 13  # ch12 追加 /hooks
     assert reg.lookup("review") is None  # 内置 /review 已删除，由同名 Skill 接管
     assert reg.lookup("skill") is not None
 

@@ -7,6 +7,7 @@ app.on_compact_done 仍在使用；docs/ch10 T9a 的"全部移除"对这两项�
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 from textual.message import Message
 from textual.widgets import OptionList, RichLog
@@ -149,8 +150,14 @@ class CommandMixin:
         select.action_first()
         self.state = SessionState.RESUMING
 
-    def clear_and_new_session(self) -> None:
-        """结束当前会话并开启新会话（docs/ch10 T9b F17/N9，旧存档保留可 /resume）。"""
+    async def clear_and_new_session(self) -> None:
+        """结束当前会话并开启新会话（docs/ch10 T9b F17/N9，旧存档保留可 /resume）。
+
+        ch12 起改 async：需要在旧会话关闭前 `await` SessionEnd 的 hook 分派
+        （docs/ch12 T20），并清掉引擎的 only_once 集合（N5）。顺序：SessionEnd →
+        关旧 writer → 换新会话 → SessionStart，这样 hook 看到的是各自时刻的真实状态。
+        """
+        await self._dispatch_session_end()
         if self.writer is not None:
             self.writer.close()
         try:
@@ -175,7 +182,11 @@ class CommandMixin:
         # 放在新会话建立之后：与 /resume「不重置」的次序形成对照，两处都靠位置说话。
         if self.discovery is not None:
             self.discovery.reset()
+        # only_once 是会话态，换会话即清空（docs/ch12 F27/N5）
+        if self.hook_engine is not None:
+            await self.hook_engine.reset_for_new_session()
         self.query_one("#log", RichLog).clear()
+        await self._dispatch_session_start()
         self._update_statusbar()
 
     def inject_and_send(self, display_label: str, preset_prompt: str) -> None:
@@ -220,6 +231,14 @@ class CommandMixin:
 
     def all_messages(self) -> list[LLMMessage]:
         return self.conv.messages()
+
+    # ---- Hook 查询（docs/ch12 T21）----
+
+    def hook_sources(self) -> list[str]:
+        return list(self.hook_engine.sources) if self.hook_engine is not None else []
+
+    def hook_rules(self) -> list[Any]:
+        return list(self.hook_engine.rules) if self.hook_engine is not None else []
 
     def _bind_conversation(self, writer: Writer) -> Conversation:
         on_append = writer.on_append if writer is not None else None

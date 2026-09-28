@@ -1,4 +1,11 @@
-"""规则引擎：allow/deny 规则、解析与 glob 匹配（docs/ch06 T4 / F3）。"""
+"""规则引擎：allow/deny 规则与解析（docs/ch06 T4 / F3；ch12 T3 换用 Matcher）。
+
+ch12 起 `Rule` 不再持 pattern 字符串，而是持一个 `Matcher`（`None` 表示「该工具
+全部调用」），匹配语义由 `matcher.py` 的四种类型承担。规则串语法见 matcher.py。
+
+`parse_rule` 现在返回 `(Rule | None, str | None)`——第二个值是错误描述，让调用方
+（`settings.to_rule_set`）能把失败规则报到 stderr 而不是静默吞掉（F4）。
+"""
 
 from __future__ import annotations
 
@@ -6,13 +13,51 @@ import re
 from dataclasses import dataclass, field
 
 from . import Decision
+from .matcher import (
+    Matcher,
+    compile_matcher,
+    escape_glob,
+    glob_to_regex,
+    match_command,
+    match_path,
+    match_pattern,
+    match_seg,
+    match_segments,
+)
+
+__all__ = [
+    "Rule",
+    "RuleSet",
+    "compile_matcher",
+    "escape_glob",
+    "glob_to_regex",
+    "match_command",
+    "match_path",
+    "match_pattern",
+    "match_seg",
+    "match_segments",
+    "parse_rule",
+]
 
 
 @dataclass
 class Rule:
+    """一条 allow/deny 规则。
+
+    `matcher is None` 表示模式段为空 → 匹配该工具的全部调用（ch06 的 `Tool` 写法）。
+    `raw` 保留原始描述串，供日志回显与幂等比对。
+    """
+
     tool: str  # 工具名（友好名或 mcp__server__tool）；含 glob 元字符时按通配匹配
-    pattern: str  # 模式段；"" 表示匹配该工具全部调用
+    matcher: Matcher | None
     allow: bool  # True=allow, False=deny
+    raw: str = ""
+
+    def hits(self, friendly: str, target: str) -> bool:
+        """工具名命中且模式命中。"""
+        if not _tool_hits(self.tool, friendly):
+            return False
+        return self.matcher is None or self.matcher.match(target)
 
 
 @dataclass
@@ -23,10 +68,10 @@ class RuleSet:
     def match(self, friendly: str, target: str) -> tuple[Decision, bool]:
         """先 deny 再 allow；返回 (Allow|Deny, 命中?)。"""
         for rule in self.deny:
-            if _tool_hits(rule.tool, friendly) and match_pattern(rule.pattern, target):
+            if rule.hits(friendly, target):
                 return Decision.DENY, True
         for rule in self.allow:
-            if _tool_hits(rule.tool, friendly) and match_pattern(rule.pattern, target):
+            if rule.hits(friendly, target):
                 return Decision.ALLOW, True
         return Decision.ALLOW, False
 
@@ -41,62 +86,28 @@ def _tool_hits(rule_tool: str, friendly: str) -> bool:
     return any(c in rule_tool for c in "*?[") and match_pattern(rule_tool, friendly)
 
 
-def parse_rule(s: str) -> tuple[Rule, bool]:
-    """解析 `Tool(pattern)` 或 `Tool`；非法返回 (Rule("","",False), False)。"""
+def parse_rule(s: str) -> tuple[Rule | None, str | None]:
+    """解析 `Tool(pattern)` 或 `Tool`；返回 (Rule, None) 或 (None, 错误描述)。
+
+    模式段的类型由前缀决定（F2）；`Bash` 的裸 glob 走命令语义，其余工具走路径语义
+    ——这修掉了 ch06 的一个缺陷：`Bash(rm *)` 过去匹配不上含 `/` 的命令（见
+    docs/ch12/checklist.md 验收报告）。
+    """
     s = s.strip()
     if not s:
-        return Rule("", "", False), False
+        return None, "empty rule"
     if "(" in s or ")" in s:
         m = re.fullmatch(r"([A-Za-z]+)\s*\((.*)\)", s)
         if not m:
-            return Rule("", "", False), False
-        return Rule(tool=m.group(1), pattern=m.group(2), allow=True), True
-    return Rule(tool=s, pattern="", allow=True), True
+            return None, "malformed rule (want 'Tool(pattern)' or 'Tool')"
+        tool, pattern = m.group(1), m.group(2)
+    else:
+        tool, pattern = s, ""
 
-
-def _glob_to_regex(glob_str: str, within_segment: bool = False) -> str:
-    """把 glob 串转正则：`*` 通配（段内或整串）；`\\*` 转义为字面 `*`。"""
-    out: list[str] = []
-    i = 0
-    while i < len(glob_str):
-        c = glob_str[i]
-        if c == "\\" and i + 1 < len(glob_str) and glob_str[i + 1] == "*":
-            out.append(r"\*")  # 字面星号
-            i += 2
-        elif c == "*":
-            out.append("[^/]*" if within_segment else ".*")
-            i += 1
-        else:
-            out.append(re.escape(c))
-            i += 1
-    return "".join(out)
-
-
-def _match_seg(pat: str, seg: str) -> bool:
-    """段内匹配：`*` 匹配段内任意字符序列。"""
-    return re.fullmatch(_glob_to_regex(pat, within_segment=True), seg) is not None
-
-
-def _match_segments(pats: list[str], segs: list[str]) -> bool:
-    """路径段匹配：`**` 匹配任意层数段。"""
-    if not pats:
-        return not segs
-    if pats[0] == "**":
-        return any(_match_segments(pats[1:], segs[i:]) for i in range(len(segs) + 1))
-    if not segs:
-        return False
-    return _match_seg(pats[0], segs[0]) and _match_segments(pats[1:], segs[1:])
-
-
-def match_pattern(pattern: str, target: str) -> bool:
-    """glob 匹配。pattern 为空恒匹配；含 / 视为文件路径段匹配，否则按命令串整串匹配。"""
     if pattern == "":
-        return True
-    if "/" in pattern or "/" in target:
-        return _match_segments(pattern.split("/"), target.split("/"))
-    return re.fullmatch(_glob_to_regex(pattern), target) is not None
-
-
-def escape_glob(s: str) -> str:
-    """转义 glob 元字符，使规则精确匹配字面内容（供持久化精确规则用）。"""
-    return re.sub(r"([*?\[\]])", r"\\\1", s)
+        return Rule(tool=tool, matcher=None, allow=True, raw=s), None
+    try:
+        matcher = compile_matcher(pattern, is_command=(tool == "Bash"))
+    except ValueError as exc:
+        return None, str(exc)
+    return Rule(tool=tool, matcher=matcher, allow=True, raw=s), None

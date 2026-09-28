@@ -115,9 +115,16 @@ async def handle_resume_key(app, event) -> bool:
 
 
 async def do_resume_session(app, info: SessionInfo) -> None:
-    """恢复指定会话：加载、时间提醒、token 超限压缩、切换会话对象（docs/ch09 F21-F23）。"""
+    """恢复指定会话：加载、时间提醒、token 超限压缩、切换会话对象（docs/ch09 F21-F23）。
+
+    ch12 起在切换前后各分派一次 hook（docs/ch12 T20）：SessionEnd 给旧会话收尾、
+    SessionResume 给新会话开场；only_once 集合随换会话清空（N5）。
+    """
     log = app.query_one("#log", RichLog)
     log.write(notice_block(f"正在恢复会话 {info.id}..."))
+    if getattr(app, "hook_engine", None) is not None:
+        await app._dispatch_session_end()
+        await app.hook_engine.reset_for_new_session()
     # 坏行跳过 + 孤立工具调用截断在 load_session 内完成（AC14/AC15）
     msgs = load_session(info.dir)
     root = str(Path(app.sessions_dir).resolve().parent.parent)  # sessions 目录 → workspace
@@ -149,4 +156,6 @@ async def do_resume_session(app, info: SessionInfo) -> None:
     app.conv = new_conv
     app.writer = new_writer
     app.ses_ctx = new_ses_ctx
+    if getattr(app, "hook_engine", None) is not None:
+        await app._dispatch_session_resume()
     log.write(notice_block(f"已恢复会话 {info.id}，共 {new_conv.length()} 条消息"))

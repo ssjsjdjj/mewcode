@@ -1,4 +1,4 @@
-"""12 条内置命令一次性注册（docs/ch10 T8；ch11 T21 换成 12 条：删 /review、加 /skill）。
+"""13 条内置命令一次性注册（docs/ch10 T8；ch11 T21 删 /review 加 /skill；ch12 T21 加 /hooks）。
 
 register_builtins 是唯一注入点：注册冲突在启动期立即暴露（F2/AC16）。
 /help 的 handler 通过 make_help_handler 工厂捕获 reg，运行时从注册中心查询
@@ -7,6 +7,7 @@ register_builtins 是唯一注入点：注册冲突在启动期立即暴露（F2
 
 from __future__ import annotations
 
+from mewcode.command.builtin_hooks import handle_hooks
 from mewcode.command.builtin_local import (
     handle_memory,
     handle_permission,
@@ -39,6 +40,7 @@ def register_builtins(reg: Registry) -> None:
         Command("do", "按计划开始执行", Kind.PROMPT, handle_do),
         Command("exit", "关闭 MewCode", Kind.UI, handle_exit),
         Command("help", "查看可用命令列表", Kind.LOCAL, make_help_handler(reg)),
+        Command("hooks", "列出已加载的 hook 列表", Kind.LOCAL, handle_hooks),
         Command("memory", "列出已加载的记忆文件", Kind.LOCAL, handle_memory),
         Command("permission", "显示当前权限模式", Kind.LOCAL, handle_permission),
         Command("plan", "切换到计划模式（只读工具）", Kind.UI, handle_plan),

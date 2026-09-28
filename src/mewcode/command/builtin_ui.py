@@ -46,5 +46,5 @@ async def handle_clear(ui: UI) -> None:
     `discovery.reset()` 刻意放在新会话建立**之后**的语义相反，两处顺序都不要动。
     """
     ui.clear_active_skills()
-    ui.clear_and_new_session()
+    await ui.clear_and_new_session()
     ui.println("已清空当前会话,开启新 session")

@@ -363,7 +363,7 @@ async def test_clear_resets_and_resume_keeps_discovery(tmp_path, monkeypatch):
     async with app.run_test():
         # /clear：新会话的已发现集合为空，首轮又只剩名字清单
         discovery.select(target)
-        app.clear_and_new_session()
+        await app.clear_and_new_session()
         assert discovery.discovered_names() == []
         assert target not in _names(app.visible_tool_defs())
 

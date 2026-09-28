@@ -9,6 +9,7 @@ from rich.text import Text
 from textual.widgets import RichLog, Static
 
 from mewcode.agent import Phase
+from mewcode.hook import Event as HookEvent
 from mewcode.tui import ChatInput, SessionState, ToolDisplay
 from mewcode.tui.commands import format_compact_notice
 from mewcode.tui.view import (
@@ -36,8 +37,27 @@ class StreamingMixin:
             return
         if self.state != SessionState.IDLE or self._stream_task is not None:
             return
+
+        # UserPromptSubmit 拦截（docs/ch12 T19/F32）：在写历史**之前**判定。
+        # 被拦下时不消费输入框——用户改完还能直接重发，不用重打。
+        if self.hook_engine is not None:
+            result = await self.hook_engine.dispatch(
+                HookEvent.USER_PROMPT_SUBMIT,
+                self._hook_payload(HookEvent.USER_PROMPT_SUBMIT, prompt=stripped),
+            )
+            if result.injected_prompts:
+                self.runtime.append_reminders(result.injected_prompts)
+            if result.blocked:
+                self._show_hook_block(result.blocking_hook_name, result.reason)
+                return
+
         self.conv.add_user(stripped)
         await self._begin_turn(stripped)
+
+    def _show_hook_block(self, hook_name: str, reason: str) -> None:
+        """被 hook 拦下：在输入框上方显示原因，焦点留在输入框等用户改（F32）。"""
+        self.query_one("#log", RichLog).write(error_block(f"[hook {hook_name}] {reason}"))
+        self.input_area.focus()
 
     async def _begin_turn(self, notice: str) -> None:
         """开始一轮：复用会话级 Agent（docs/ch08 T32.5），不再每轮重建。"""

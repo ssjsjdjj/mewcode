@@ -7,10 +7,13 @@ handler 只依赖本协议（F33/F34），不直接持有 Textual App 引用；M
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from mewcode.llm import Message
 from mewcode.permission import Mode
+
+if TYPE_CHECKING:
+    from mewcode.hook import Rule
 
 
 @dataclass(frozen=True)
@@ -56,7 +59,7 @@ class UI(Protocol):
     def quit(self) -> None: ...
     def force_compact(self) -> None: ...
     def open_resume_menu(self) -> None: ...
-    def clear_and_new_session(self) -> None: ...
+    async def clear_and_new_session(self) -> None: ...
 
     # 状态机查询（N3a：UI/PROMPT 命令仅在 idle 可执行）
     def idle(self) -> bool: ...
@@ -68,6 +71,10 @@ class UI(Protocol):
     def append_assistant_message(self, text: str) -> None: ...
     def recent_messages(self, n: int) -> list[Message]: ...
     def all_messages(self) -> list[Message]: ...
+
+    # Hook 相关（docs/ch12 T21）
+    def hook_sources(self) -> list[str]: ...
+    def hook_rules(self) -> list[Rule]: ...
 
 
 class NopUI:
@@ -114,7 +121,7 @@ class NopUI:
 
     def open_resume_menu(self) -> None: ...
 
-    def clear_and_new_session(self) -> None: ...
+    async def clear_and_new_session(self) -> None: ...
 
     def idle(self) -> bool:
         return True
@@ -134,4 +141,11 @@ class NopUI:
         return []
 
     def all_messages(self) -> list[Message]:
+        return []
+
+    # Hook 相关零值实现（T21）
+    def hook_sources(self) -> list[str]:
+        return []
+
+    def hook_rules(self) -> list[Rule]:
         return []

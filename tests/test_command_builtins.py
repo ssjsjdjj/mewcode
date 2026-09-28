@@ -19,6 +19,7 @@ BUILTIN_NAMES = [
     "do",
     "exit",
     "help",
+    "hooks",
     "memory",
     "permission",
     "plan",
@@ -38,7 +39,7 @@ def _reg() -> Registry:
 def test_register_builtins_all_registered():
     reg = _reg()
     visible = reg.visible()
-    assert len(visible) == 12
+    assert len(visible) == len(BUILTIN_NAMES)
     assert [c.name for c in visible] == sorted(BUILTIN_NAMES)
 
 

@@ -47,7 +47,7 @@ async def _type(app, pilot, text: str) -> None:
     await pilot.pause()
 
 
-def test_e2e_help_lists_all_12():
+def test_e2e_help_lists_all_builtins():
     async def sc():
         app = _tui_app()
         async with app.run_test() as pilot:
@@ -77,14 +77,14 @@ def test_e2e_status_six_fields():
     asyncio.run(sc())
 
 
-def test_e2e_slash_pops_menu_with_12():
+def test_e2e_slash_pops_menu_with_all_builtins():
     async def sc():
         app = _tui_app()
         async with app.run_test() as pilot:
             await pilot.pause()
             await _type(app, pilot, "/")
             assert app.completion.active is True
-            assert len(app.completion.items) == 12
+            assert len(app.completion.items) == 13  # ch12 追加 /hooks
             assert _completion_text(app) != ""
 
     asyncio.run(sc())
