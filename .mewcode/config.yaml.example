@@ -1,0 +1,38 @@
+# MewCode 配置文件模板。
+# 复制为 config.yaml 后填入你的 api_key 即可使用。
+
+# ---- 项目指令（MEWCODE.md）----
+# 启动时按以下优先级扫描三层指令文件，找到就加载、找不到就跳过，按序拼接后
+# 注入系统提示的 custom-instructions 模块槽位（priority 80）：
+#   ① <项目根>/MEWCODE.md                 （项目级，最高优先级）
+#   ② <项目根>/.mewcode/MEWCODE.md        （项目配置级）
+#   ③ ~/.mewcode/MEWCODE.md               （用户级，最低优先级）
+# 指令文件支持 @include 引用其他文件（嵌套上限 5 层，路径不能逃逸出所属根边界）。
+
+# ---- 持久化目录（.mewcode/ 下自动生成）----
+#   memory/   自动笔记：LLM 从对话提取的长期记忆，两级存放
+#             （项目级 .mewcode/memory/、用户级 ~/.mewcode/memory/），
+#             索引 MEMORY.md 注入系统提示的 long-term-memory 槽位（priority 100）。
+#   sessions/ 会话存档：每次启动生成 <YYYYMMDD-HHMMSS-xxxx> 目录，对话以 JSONL
+#             实时追加写入 conversation.jsonl；可用 /resume 恢复历史会话，
+#             超过 30 天的会话目录在启动时自动清理。
+
+# context_window 单位 token，可选；未配置时按 protocol 默认（anthropic 200000、openai 128000）。
+providers:
+  # 示例：Anthropic（含 thinking: true，开启 Claude 扩展思考）
+  - name: my-claude
+    protocol: anthropic
+    model: claude-sonnet-5-20251001
+    base_url: https://api.anthropic.com
+    api_key: sk-ant-xxxx
+    thinking: true
+    context_window: 200000
+
+  # 示例：OpenAI 协议（如 DeepSeek），默认不开启 thinking
+  # - name: deepseek
+  #   protocol: openai
+  #   model: deepseek-chat
+  #   base_url: https://api.deepseek.com
+  #   api_key: sk-xxxx
+  #   thinking: false
+  #   context_window: 128000

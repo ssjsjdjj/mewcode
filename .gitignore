@@ -1,0 +1,14 @@
+.mewcode/config.yaml
+.mewcode/settings.local.yaml
+.mewcode/sessions/
+.mewcode/memory/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.legacy-backup/
+.legacy-backup-flat/
+
+# 与 AI 的对话记录，不公开
+mewcode-聊天记录.md

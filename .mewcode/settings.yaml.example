@@ -1,0 +1,19 @@
+# MewCode 权限配置示例。
+# 三层文件（按优先级从高到低）：
+#   1. <项目根>/.mewcode/settings.local.yaml   本地（最优先）
+#   2. <项目根>/.mewcode/settings.yaml         项目
+#   3. ~/.mewcode/settings.yaml                用户
+# 规则合并后同层 deny 优先；单个文件读/解析失败仅降级跳过该文件，绝不致命。
+# 只读类工具默认即 Allow，allow 规则主要用于提前放行 Bash/Write；
+# deny 规则可对只读做围栏（如 Read(.env)）。
+
+default_mode: default
+
+permissions:
+  allow:
+    - "Bash(git *)"
+    - "Bash(pytest)"
+  deny:
+    - "Bash(rm *)"
+    - "Read(.env)"
+    - "Write(.env)"

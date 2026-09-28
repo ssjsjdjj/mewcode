@@ -1,0 +1,8 @@
+# 仓库内统一以 LF 存储与检出，避免 Windows 上 CRLF 造成全库行尾抖动
+* text=auto eol=lf
+
+# 二进制资源不做行尾转换
+*.png binary
+*.jpg binary
+*.zip binary
+*.ico binary

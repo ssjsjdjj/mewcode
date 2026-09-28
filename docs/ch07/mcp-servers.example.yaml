@@ -1,0 +1,25 @@
+# MCP server 配置示例（docs/ch07 T6）
+#
+# 放置位置：项目级 <root>/.mewcode.yaml；用户级 ~/.mewcode/config.yaml。
+# 两层都读 mcp_servers 段，按 server 名合并；同名 server 项目级完整覆盖用户级。
+# env / headers 的值支持 ${VAR} 从宿主环境变量展开（密钥不落盘）；command / args 不展开。
+# 每个 server 必须显式声明 type: stdio 或 type: http。
+
+mcp_servers:
+  github:
+    type: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-github"]
+    env:
+      GITHUB_TOKEN: "${GITHUB_TOKEN}"
+
+  local-sqlite:
+    type: stdio
+    command: python
+    args: ["-m", "mcp_server_sqlite", "--db", "./data.db"]
+
+  example-http:
+    type: http
+    url: "https://mcp.example.com/mcp"
+    headers:
+      Authorization: "Bearer ${EXAMPLE_TOKEN}"
