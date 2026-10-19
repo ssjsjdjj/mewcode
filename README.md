@@ -161,10 +161,6 @@ python -m mewcode
 | ch14 | Worktree 隔离 |
 | ch15 | Agent Team 多智能体协作 |
 
-## Windows Codex 图片技能
-
-本仓库另收录[尺寸调整与白底透明图迁移包](codex-skills/README.md)，包含完整技能源码 ZIP、自动安装依赖的提示词和使用说明，供新 Windows 电脑的 Codex 安装使用。
-
 ## 开发
 
 ```bash
